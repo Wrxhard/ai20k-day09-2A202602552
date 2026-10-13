@@ -36,12 +36,40 @@ Pipeline giữ mỗi nguồn một bảng Bronze riêng và lưu tất cả các
 ### Câu 2
 Pipeline đưa hai nguồn về một schema như thế nào (đơn vị, kiểu thời gian, **độ lệch đồng hồ**)? Bằng chứng nào trong kết quả bước 2 cho thấy đã đúng? Dán bảng quarantine của bạn (số dòng theo từng lý do, từng drive) và giải thích vì sao dòng lỗi vào `rejects` thay vì bị xoá.
 
-(trả lời ở đây)
+Pipeline sử dụng các mô hình dbt staging (`stg_telemetry_a.sql` và `stg_telemetry_b.sql`) để chuẩn hóa hai nguồn về cùng một schema Silver:
+1. **Đơn vị vận tốc**: Nguồn A giữ nguyên `speed_mps` (m/s). Nguồn B chia cho 3.6 (`spd_kmh / 3.6`) để quy đổi từ km/h sang m/s.
+2. **Kiểu thời gian**: Nguồn A parse chuỗi ISO UTC thành timestamp. Nguồn B chuyển đổi số nguyên epoch millisecond thành timestamp UTC.
+3. **Độ lệch đồng hồ (Clock Offset)**: Nguồn B được cấu hình trong `sources.json` bị lệch 1500 ms so với video, pipeline đã tự động trừ 1500 ms (`- interval '1500 millisecond'`) cho tất cả các bản ghi của drive B.
+
+**Bằng chứng cho thấy đã đúng**:
+- Mốc thời gian bắt đầu của drive B sau khi chuẩn hóa là `2025-10-08 14:30:00.009000+00:00`, khớp hoàn toàn với mốc bắt đầu của video (`2025-10-08 14:30:00`), độ lệch chỉ 9 ms (đạt bài test tự động `within 0.5 s`). Vận tốc tối đa của hai drive đều hợp lý (drive A: 71 km/h, drive B: 100 km/h).
+
+**Bảng Quarantine (dòng lỗi cách ly)**:
+| drive_id | reject_reason | so_dong |
+|---|---|---|
+| drive_a | duplicate | 20 |
+| drive_a | speed_missing | 30 |
+| drive_a | speed_out_of_range | 3 |
+| drive_b | duplicate | 20 |
+| drive_b | speed_missing | 30 |
+| drive_b | speed_out_of_range | 3 |
+
+**Vì sao dòng lỗi vào `rejects` thay vì bị xóa**:
+- Trong Data Engineering chuyên nghiệp, việc âm thầm xóa dữ liệu lỗi (silent drop) vi phạm nguyên tắc kiểm toán (auditability). Dòng lỗi được chuyển vào `telemetry_rejects` giúp bảo toàn phương trình cân bằng dữ liệu: `dòng sạch + dòng reject = tổng nhận về` (drive A: 2968 + 53 = 3021 dòng; drive B: 3181 + 53 = 3234 dòng). Nhờ đó, kỹ sư vận hành có thể giám sát tỷ lệ lỗi theo thời gian, phát hiện sớm các cảm biến xe bị hỏng hoặc mất xung, đồng thời có thể phân tích nguyên nhân gốc rễ và xử lý lại khi cần.
 
 ### Câu 3
 Vì sao test `max_gap_ms` là `warn` còn `in_range` là `error`? Kết quả thí nghiệm `break-gate` của bạn (`break_gate.json`): test nào bắt được, bao nhiêu dòng, và điều đó cho biết gì về vai trò của "cổng chất lượng"?
 
-(trả lời ở đây)
+1. **Phân biệt `warn` và `error`**:
+- Test `max_gap_ms` được cấu hình là `warn` (cảnh báo) vì việc mất tín hiệu telemetry tạm thời trong vài giây có thể xảy ra khi xe đi qua vùng khuất sóng, đường hầm hoặc độ trễ mạng ngắn. Đây là biến động ngoại cảnh cho phép, cảnh báo nhắc nhở kỹ sư nhưng không nên làm dừng toàn bộ pipeline xử lý của cả chuyến xe.
+- Ngược lại, test `in_range` (tốc độ trong khoảng 0..70 m/s ~ 252 km/h) bắt buộc là `error` (dừng pipeline) vì các giá trị tốc độ âm hoặc vượt quá giới hạn vật lý là dữ liệu rác nghiêm trọng. Nếu lọt xuống tầng Gold, chúng sẽ làm sai lệch mô hình huấn luyện xe tự lái và gây nguy cơ mất an toàn thực tế.
+
+2. **Kết quả thí nghiệm `break-gate` (`break_gate.json`)**:
+- Khi nới luật làm sạch từ 70 m/s lên 1000 m/s, 6 dòng tốc độ dị thường lọt qua bước làm sạch sơ bộ vào Silver.
+- Cổng chất lượng dbt test lập tức phát hiện và chặn lại: test `in_range_silver_telemetry_speed_mps__70__0` báo FAIL với đúng 6 dòng lỗi vi phạm (`PASS=5 WARN=1 ERROR=1 SKIP=0`). Sau khi khôi phục luật gốc, hệ thống trở lại bình thường (`PASS=6 WARN=1 ERROR=0 SKIP=0`).
+
+3. **Vai trò của cổng chất lượng**:
+- Cổng chất lượng đóng vai trò như một cơ chế phòng thủ chiều sâu (defense-in-depth). Ngay cả khi logic code biến đổi ở thượng nguồn bị sửa sai sót hoặc nới lỏng quá mức, Quality Gate đặt tại ranh giới tầng dữ liệu sẽ tự động chặn đứng dữ liệu xấu, đảm bảo dữ liệu bẩn không bao giờ được phép đi tiếp sang tầng Gold và downstream consumers.
 
 ## Bước 3 · Silver frames
 
