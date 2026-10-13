@@ -158,21 +158,60 @@ Vì sao `dataset_version` là **băm nội dung** chứ không phải ngày gi�
 ### Câu 9
 Mô tả chính xác điều xảy ra khi trip của bạn sập rồi chạy lại: bao nhiêu task chuyển đỏ, bao nhiêu task `upstream_failed`, bạn clear gì, dữ liệu có nhân đôi không, `dataset_version` có đổi không? Bằng chứng (ảnh, số) là gì?
 
-(trả lời ở đây)
+**Hiện tượng khi trip của tôi (`trip-03365`) bị sập**:
+1. **Số task bị ảnh hưởng**:
+- Đúng **1 task** chuyển sang màu đỏ (`failed`): task `silver_frames` với `map_index = 8` (trích xuất video của trip `trip-03365`). Log báo lỗi rõ ràng: `RuntimeError: simulated crash while extracting trip-03365; run it again`.
+- Đúng **7 task** hạ nguồn phụ thuộc chuyển sang trạng thái màu cam `upstream_failed`: `dbt_run_silver`, `dbt_test_silver`, `dbt_run_gold`, `dbt_test_gold`, `publish_lake`, `export_dataset`, `publish_warehouse`.
+- Toàn bộ 25 task `silver_frames` của 25 trip còn lại vẫn chạy độc lập và thành công (`success`). Cơ chế Dynamic Task Mapping của Airflow giúp cô lập lỗi cục bộ ở mức partition, không làm hỏng tiến trình của các chuyến xe khác.
+2. **Thao tác xử lý**:
+- Nhấp vào task đỏ `silver_frames [8]`, bấm nút **Clear** (Clear task).
+- Airflow chỉ chạy lại duy nhất một task đó. Do file đánh dấu `.failed-trip-03365` đã được ghi nhận trong lần thử đầu, lần chạy thứ hai thành công ngay lập tức. Sau đó, Airflow tự động kích hoạt lại 7 task hạ nguồn và toàn bộ DAG chuyển sang màu xanh lá cây (`success`).
+3. **Tính toàn vẹn dữ liệu**:
+- Dữ liệu **hoàn toàn không bị nhân đôi**: Nhờ cơ chế Delta Lake partition overwrite (`replaceWhere = "trip_id = 'trip-03365'"`), tổng số frame của silver vẫn là 1246 dòng, số frame gold vẫn là 1019 dòng.
+- `dataset_version` **hoàn toàn không đổi** (vẫn là `e6294fd425b2`), kiểm tra hệ thống `scripts/lab.sh verify` vẫn đạt chuẩn 27/27 checks passed.
+- **Bằng chứng**: Ảnh chụp `task_crash_log.png` thấy rõ dòng lỗi sập `trip-03365`, ảnh `task_crash_grid.png` thấy DAG grid với 1 task đỏ và các task `upstream_failed`.
 
 ### Câu 10
 Nâng từ 2 drive lên **500 xe mỗi ngày**: ba thành phần nào của pipeline này sẽ vỡ đầu tiên, và bạn thay bằng gì (nối với slide 12, 22, 23)?
 
-(trả lời ở đây)
+Khi quy mô tăng lên 500 xe/ngày (tương đương 5.000 - 10.000 chuyến đi, hàng chục triệu dòng telemetry và terabyte video), ba thành phần sau sẽ quá tải đầu tiên:
+
+1. **Bộ giải mã video FFmpeg chạy cục bộ (Local Video Decoding)**:
+- *Vấn đề*: Hiện tại FFmpeg chạy trực tiếp trên worker container duy nhất. Giải mã video là thao tác ngốn CPU và I/O đĩa lớn nhất (slide 24). Khi có hàng ngàn video chunks, một máy đơn lẻ sẽ bị nghẽn CPU/Disk và cạn kiệt bộ nhớ ngay lập tức.
+- *Thay thế bằng*: Kiến trúc tính toán phân tán (Distributed Processing) sử dụng Cloud Dataflow (Apache Beam) hoặc Dataproc Serverless / Kubernetes Jobs với GPU/Hardware Acceleration để decode song song hàng ngàn partition trên cụm máy chủ tự co giãn (autoscaling).
+
+2. **DuckDB đơn luồng cục bộ (Local Single-Node DuckDB Engine)**:
+- *Vấn đề*: Toàn bộ quá trình dbt transform và join event-time (ASOF join) đang chạy qua một file DuckDB cục bộ (`work/lakehouse.duckdb`). Hàng chục triệu bản ghi telemetry và khung hình sẽ vượt quá dung lượng RAM và đĩa cục bộ của một nút, gây OOM (Out-of-Memory) crash (slide 22).
+- *Thay thế bằng*: Công cụ xử lý dữ liệu lớn phân tán như Apache Spark (trên Google Cloud Dataproc) hoặc Trino / BigQuery để thực hiện ELT và ASOF join phân tán trên định dạng Lakehouse mở (Delta Lake hoặc Iceberg) (slide 16, 22).
+
+3. **PostgreSQL đơn lẻ phục vụ BI / Warehouse**:
+- *Vấn đề*: Toàn bộ mart được ghi vào một database PostgreSQL duy nhất. Khi bảng `mart_frame_gallery` và các bảng mart khác phình to lên hàng trăm GB, Postgres sẽ bị nghẽn nút thắt cổ chai I/O ghi đĩa và các câu query phân tích Metabase sẽ bị treo hoặc timeout (slide 16, 23).
+- *Thay thế bằng*: Data Warehouse đám mây hiện đại có khả năng tách biệt hoàn toàn giữa lưu trữ và tính toán (Decoupled Storage & Compute) như Google BigQuery, ClickHouse hoặc Snowflake. Kết hợp tính năng BigLake / External Table để truy vấn trực tiếp dữ liệu trên MinIO/GCS mà không cần nạp vật lý.
 
 ## Câu hỏi riêng của bạn trên Metabase
 
 Câu SQL bạn thêm vào dashboard và điều nó cho biết:
 
-(trả lời ở đây)
+```sql
+SELECT 
+    trip_id,
+    drive_id,
+    frames_kept,
+    frames_black + frames_blurry + frames_near_dup + frames_out_of_sync AS frames_rejected,
+    ROUND(100.0 * (frames_black + frames_blurry + frames_near_dup + frames_out_of_sync) / NULLIF(frames_total, 0), 1) AS reject_rate_pct
+FROM marts.mart_trip_summary
+ORDER BY reject_rate_pct DESC
+LIMIT 10;
+```
+
+**Ý nghĩa và điều nó cho biết**:
+- Câu truy vấn này tính toán tỷ lệ phần trăm khung hình bị loại bỏ (`reject_rate_pct`) trên từng chuyến xe từ bảng `marts.mart_trip_summary`.
+- Kết quả giúp kỹ sư vận hành và đội ngũ QA nhanh chóng xác định các chuyến đi có tỷ lệ lỗi cao bất thường (ví dụ trip có camera bị đứng hình 6 giây liên tục ở drive A, hoặc trip bị mất đồng bộ cảm biến). Nhờ đó, đội bảo trì phần cứng có thể khoanh vùng xe gặp sự cố về dây cáp hoặc cảm biến để kiểm tra, thay vì phải kiểm tra thủ công toàn bộ đội xe.
 
 ## Nhìn lại
 
 Điều bạn thấy bất ngờ nhất, điều gì còn chưa rõ, và một lỗi dữ liệu mà bạn nghĩ pipeline **chưa** bắt được (nếu có). Tối đa 8 dòng.
 
-(trả lời ở đây)
+- **Bất ngờ nhất**: Khả năng join đồng bộ theo Event Time (ASOF join) giữa telemetry tần số cao với khung hình video, cùng cơ chế Dynamic Task Mapping của Airflow kết hợp Delta Lake partition overwrite: khi một trip bị lỗi sập, ta chỉ cần retry duy nhất trip đó trong vài giây mà không cần chạy lại cả DAG hay lo sợ bị trùng lặp dữ liệu.
+- **Điều còn chưa rõ**: Cách tinh chỉnh tần số lấy mẫu (sampling rate, hiện cố định ở 2 fps) thích ứng động theo vận tốc xe (ví dụ: tăng fps khi xe tăng tốc/chuyển làn gấp và giảm fps khi dừng đèn đỏ) để tối ưu lưu trữ mà không bỏ sót sự kiện quan trọng.
+- **Lỗi dữ liệu pipeline chưa bắt được**: Hiện tượng ống kính camera bị bẩn cục bộ (vết bùn, giọt nước mưa đọng trên lens) hoặc chói lóa ánh nắng trực diện (glare/flare) che khuất tầm nhìn phía trước, khiến hình ảnh mất thông tin vật thể dù độ nét Laplacian và độ sáng trung bình vẫn nằm trong ngưỡng hợp lệ.
