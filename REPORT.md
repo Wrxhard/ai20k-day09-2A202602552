@@ -4,15 +4,15 @@
 
 | | |
 |---|---|
-| Họ và tên | `<điền>` |
-| MSSV (đúng bằng `LAB_STUDENT_ID` trong `.env`) | `<điền>` |
-| GitHub | `<điền: tên tài khoản>` |
-| Trip dùng cho bài tập sập và chạy lại (xem GUIDE, bước 5) | `<điền: trip-xxxxx>` |
+| Họ và tên | `Mai Xuân Phúc` |
+| MSSV (đúng bằng `LAB_STUDENT_ID` trong `.env`) | `2A202602552` |
+| GitHub | `Wrxhard` |
+| Trip dùng cho bài tập sập và chạy lại (xem GUIDE, bước 5) | `trip-03365` |
 
 ## Kết quả cuối
 
-- `dataset_version` của bạn: `<điền>`  (phải khớp `report/evidence/run_summary.json`)
-- Số khung hình train / val / test của bạn: `<điền>`
+- `dataset_version` của bạn: `e6294fd425b2`  (phải khớp `report/evidence/run_summary.json`)
+- Số khung hình train / val / test của bạn: `train: 707, val: 130, test: 182 (tổng 1019)`
 - `report/verify.txt`: tạo bằng `python3 scripts/check_submission.py --save-verify` (phải có `27/27 checks passed`).
 - Ảnh chụp trong `report/screenshots/`: `airflow_graph.png`, `minio_lake.png`, `metabase_dashboard.png`, và ảnh bài tập sập/chạy lại (log task đỏ thấy trip của bạn).
 
@@ -21,7 +21,15 @@
 ### Câu 1
 Liệt kê **ít nhất 4 khác biệt** giữa telemetry nguồn A và nguồn B mà bạn thấy ở bronze. Vì sao pipeline giữ **mỗi nguồn một bảng bronze** và để mọi cột ở dạng chữ, thay vì gộp và ép kiểu ngay?
 
-(trả lời ở đây)
+Bốn khác biệt rõ rệt giữa telemetry nguồn A và nguồn B quan sát được ở tầng Bronze:
+1. **Timestamp**: Nguồn A dùng cột `ts_utc` định dạng chuỗi chuẩn ISO 8601 UTC (`2025-10-07T08:00:00.014Z`), trong khi Nguồn B dùng cột `timestamp_ms` dạng số nguyên Unix epoch milliseconds (`1759933801509`).
+2. **Vận tốc (Speed)**: Nguồn A lưu ở cột `speed_mps` với đơn vị mét trên giây (m/s), trong khi Nguồn B lưu ở cột `spd_kmh` với đơn vị kilômét trên giờ (km/h).
+3. **Bàn đạp & Góc lái**: Nguồn A đặt tên là `gas`, `brake` (giá trị float từ 0 đến 1) và `steer`; Nguồn B đặt tên là `throttle_pct`, `brake_pct` (đơn vị phần trăm %) và `steering`.
+4. **Tọa độ, độ cao & Độ lệch đồng hồ**: Nguồn A dùng tên ngắn gọn `lat`, `lon`, `alt_m`, `heading_deg` và có độ lệch đồng hồ bằng 0 (`telemetry_clock_offset_ms = 0`); Nguồn B dùng `latitude`, `longitude`, `altitude`, `hdg` và bị lệch đồng hồ 1500 ms so với video (`telemetry_clock_offset_ms = 1500`).
+
+Pipeline giữ mỗi nguồn một bảng Bronze riêng và lưu tất cả các cột dưới dạng chuỗi (text/string) vì:
+- **Ngăn ngừa lỗi Schema Drift & Bảo toàn nguyên bản (Raw Fidelity)**: Nguồn A và B đến từ hai thiết bị/cảm biến với cấu trúc và đơn vị khác nhau. Ép kiểu ngay từ đầu sẽ khiến hệ thống dễ bị crash khi gặp dữ liệu dị thường (chuỗi rỗng, format lạ, null) hoặc âm thầm làm mất độ chính xác ban đầu.
+- **Tính bất biến và khả năng Replay (Idempotency)**: Bronze đóng vai trò là "Single Source of Truth" bất biến (append-only). Giữ nguyên dạng text cho phép toàn bộ logic làm sạch, chuẩn hóa và ép kiểu ở Silver có thể sửa đổi và chạy lại bất cứ lúc nào từ dữ liệu gốc mà không cần thu thập lại dữ liệu từ xe.
 
 ## Bước 2 · Silver telemetry
 
