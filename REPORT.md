@@ -76,18 +76,36 @@ Vì sao test `max_gap_ms` là `warn` còn `in_range` là `error`? Kết quả th
 ### Câu 4
 Dựa vào `idempotency.json`: số dòng trước và sau hai lần chạy lại, và khi ghi kiểu `append`. Vì sao Delta `overwrite` theo partition (một trip) an toàn hơn xoá rồi ghi lại, nhất là khi giữa chừng có lỗi?
 
-(trả lời ở đây)
+**Số liệu từ `idempotency.json` (thí nghiệm trên trip-00003)**:
+- Số dòng trước khi chạy lại: 1246 dòng, dấu vân tay (fingerprint): `6c7480dfde7e`.
+- Số dòng sau 2 lần chạy lại: 1246 dòng, dấu vân tay: `6c7480dfde7e` (giữ nguyên tuyệt đối, không đổi).
+- Số dòng nếu ghi kiểu `append` sai lầm (chạy 2 lần cho 1 trip có 60 khung): tăng gấp đôi lên 120 dòng (nhân đôi 2x dữ liệu).
+
+**Vì sao Delta `overwrite` theo partition an toàn hơn xoá rồi ghi lại**:
+- Delta Lake đảm bảo tính nguyên tử (Atomicity) theo chuẩn ACID: Thao tác ghi đè theo phân vùng (`replaceWhere = "trip_id = '...'"` ) sẽ ghi các file Parquet mới vào storage trước, sau đó mới cập nhật metadata trong transaction log (`_delta_log`) trong đúng một commit duy nhất.
+- Nếu quá trình trích xuất bị sập giữa chừng (crash, mất điện, tràn đĩa), transaction chưa được commit sẽ bị hủy (rollback), toàn bộ dữ liệu cũ của partition đó vẫn nguyên vẹn. Ngược lại, nếu thực hiện "Xóa rồi Ghi lại" (Delete-then-Write): nếu bước xóa đã xong mà bước ghi bị sập giữa chừng, partition đó sẽ bị mất dữ liệu vĩnh viễn (data loss); đồng thời người dùng đang truy vấn đồng thời (concurrent queries) sẽ nhìn thấy bảng bị rỗng hoặc thiếu dữ liệu.
 
 ### Câu 5
 Khung hình **đen** và khung hình **tối** khác nhau thế nào, pipeline xử lý khác nhau ra sao, bạn có đồng ý không? Dựa vào `threshold.json`: nếu chọn ngưỡng 0, 2, 6 thì bao nhiêu khung bị coi là trùng ở mỗi drive? Bạn chọn ngưỡng nào, vì sao, và ngưỡng đó phụ thuộc vào tốc độ xe thế nào?
 
+**Khác biệt giữa khung đen và khung tối, cách xử lý**:
+- Khung hình **đen** (`black`): Do camera mất tín hiệu, che ống kính hoặc hỏng cảm biến (độ sáng trung bình $\le 5$ hoặc toàn đen). Chúng không chứa bất kỳ thông tin ngữ cảnh nào nên pipeline **loại bỏ hoàn toàn** (drive A có 6 khung, drive B có 4 khung).
+- Khung hình **tối** (`low_light`): Là cảnh lái xe thực tế trong điều kiện thiếu sáng (ban đêm, chui qua hầm, bóng râm gầm cầu). Mặc dù độ sáng thấp nhưng vẫn chứa thông tin vật thể, làn đường và biển báo. Pipeline **gắn cờ cảnh báo nhưng vẫn giữ lại** (drive B có 61 khung tối được giữ lại, drive A có 4).
+- **Đánh giá**: Tôi hoàn toàn đồng ý với thiết kế này. Mô hình xe tự lái cần dữ liệu ánh sáng yếu để học cách thích nghi với các điều kiện môi trường bất lợi trong thế giới thực, chỉ loại bỏ các khung hỏng vật lý vô giá trị.
+
+**Bảng thống kê ngưỡng dHash từ `threshold.json`**:
 | dHash khác tối đa | số khung trùng, drive A | số khung trùng, drive B |
 |---|---|---|
-| 0 | | |
-| 2 | | |
-| 6 | | |
+| 0 | 61 | 8 |
+| 2 | 149 | 53 |
+| 6 | 363 | 244 |
 
-(trả lời ở đây)
+**Lựa chọn ngưỡng và sự phụ thuộc vào vận tốc xe**:
+- **Chọn ngưỡng 2** (ngưỡng pipeline sử dụng):
+  + Ngưỡng 0 quá nghiêm ngặt, chỉ bắt được ảnh giống nhau 100% từng pixel băm, bỏ sót các khung hình thực tế đứng yên nhưng bị nhiễu hạt cảm biến (sensor noise) hoặc ánh sáng thay đổi vi lượng.
+  + Ngưỡng 6 lại quá lỏng lẻo: loại bỏ quá nhiều khung (363 khung ở A, 244 khung ở B, tức hơn một nửa dữ liệu), dễ xóa nhầm cả các khung hình có phương tiện di chuyển chậm hoặc góc lái đang thay đổi.
+  + Ngưỡng 2 vừa đủ để loại bỏ các đoạn đứng hình (như camera đứng hình 6 giây ở A) mà vẫn bảo tồn thông tin chuyển động thực tế.
+- **Phụ thuộc vào tốc độ xe**: Xe di chuyển càng chậm thì sự thay đổi hình ảnh giữa 2 khung hình liên tiếp càng nhỏ (khoảng cách bit dHash thấp $\le 2$), dẫn tới số lượng khung trùng càng nhiều (ở drive A tốc độ trung bình thấp 34 km/h có tới 149 khung trùng ở ngưỡng 2; drive B chạy nhanh 74 km/h chỉ có 53 khung trùng). Khi xe chạy tốc độ cao trên cao tốc, cảnh quan thay đổi nhanh nên dHash cách biệt lớn, số khung trùng sẽ rất thấp.
 
 ## Bước 4 · Gold
 
