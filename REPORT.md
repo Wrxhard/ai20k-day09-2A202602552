@@ -112,17 +112,46 @@ Khung hình **đen** và khung hình **tối** khác nhau thế nào, pipeline x
 ### Câu 6
 Dựa vào `leakage.json`: chia theo khung hình làm bao nhiêu trip bị chia cắt, so với chia theo trip? Vì sao điều này làm điểm kiểm thử đẹp một cách giả tạo?
 
-(trả lời ở đây)
+**Số liệu từ `leakage.json` (1019 khung hình hợp lệ thuộc 26 trip)**:
+- **Chia THEO KHUNG HÌNH (ngẫu nhiên 70/15/15)**: Toàn bộ **26/26 trip bị chia cắt** (`per_frame_split_trips_straddling = 26`), và **cả 26 trip đều có khung hình xuất hiện đồng thời ở cả train lẫn test** (`per_frame_split_trips_in_both_train_and_test = 26`).
+- **Chia THEO TRIP (Gold của pipeline)**: **0 trip bị chia cắt** (`per_trip_split_trips_straddling = 0`), mỗi trip thuộc về duy nhất một split.
+
+**Vì sao điểm kiểm thử đẹp giả tạo (Data Leakage)**:
+- Trong dữ liệu video xe tự lái (10 fps / 2 fps), các khung hình liên tiếp trong cùng một chuyến đi chỉ cách nhau từ 0.1 đến 0.5 giây. Chúng có bối cảnh cảnh quan, góc camera, thời tiết, ánh sáng và mặt đường gần như giống hệt nhau.
+- Nếu chia ngẫu nhiên theo khung hình, mô hình ML đã "học thuộc lòng" bối cảnh môi trường ở tập train. Khi đánh giá trên tập test (vốn chứa các khung hình chỉ cách khung train một khoảng thời gian cực ngắn), mô hình dễ dàng đạt độ chính xác rất cao vì đã thấy đề thi trước, chứ không phải vì có khả năng khái quát hóa (generalization). Khi triển khai xe thật trên cung đường mới lạ, mô hình sẽ thất bại hoàn toàn.
 
 ### Câu 7
 Vì sao `dataset_version` là **băm nội dung** chứ không phải ngày giờ hay số đếm? Hai lần chạy liên tiếp cho kết quả gì? Vì sao `dataset_version` của bạn **khác** bạn bè dù cùng dữ liệu (liên hệ MSSV)?
 
-(trả lời ở đây)
+1. **Vì sao dùng băm nội dung (Content Hash)**:
+- Đảm bảo tính xác thực và tính tái lập (Reproducibility): Nếu đánh số tăng dần (v1, v2) hoặc dùng timestamp, mỗi lần chạy pipeline sẽ tạo ra một phiên bản mới dù dữ liệu và logic không thay đổi, gây trùng lặp và khó quản lý. Băm nội dung đảm bảo tính Idempotent: cùng một tập khung hình và siêu dữ liệu đầu vào sẽ luôn cho ra đúng một mã băm duy nhất (`e6294fd425b2`). Hai lần chạy liên tiếp sẽ cho ra kết quả mã version giống hệt nhau.
+2. **Vì sao khác bạn bè dù cùng dữ liệu**:
+- Trong mô hình `gold_dataset_frames.sql`, danh sách trip được sắp xếp ngẫu nhiên có muối (salt) bằng công thức:
+  `order by md5(trip_id || '{{ env_var("LAB_STUDENT_ID", "") }}')`
+- Vì `LAB_STUDENT_ID` là MSSV của tôi (`2A202602552`), chuỗi băm MD5 tạo ra thứ tự sắp xếp trip riêng biệt, dẫn đến phân bổ các trip vào các tập train, val, test khác với các sinh viên khác. Do nội dung các tập split khác nhau nên mã băm `dataset_version` của tôi là duy nhất.
 
 ### Câu 8
 Đọc phần `lineage` trong `manifest.json` của dataset bạn. Trả lời "dataset này được tạo từ dữ liệu nào?" bằng chính nội dung đó. Nếu một người hỏi 3 tháng sau, thông tin nào giúp tái tạo lại đúng dataset này?
 
-(trả lời ở đây)
+**Dataset này được tạo từ nội dung `lineage` trong `manifest.json`**:
+- Bảng Delta upstream:
+  + `bronze.raw_telemetry_a` (version 0)
+  + `bronze.raw_telemetry_b` (version 0)
+  + `bronze.trips_raw` (version 0)
+  + `bronze.video_files` (version 1)
+  + `silver.frames` (version 27)
+  + `silver.telemetry` (version 0)
+  + `silver.frames_flagged` (version 0)
+  + `silver.frame_telemetry` (version 0)
+- Nguồn video gốc theo SHA-256:
+  + `drive_a`: `636ba1a98dfc5ba665d1c935e1d2064e69f4df360ff9ffbd15795957d5e7e9aa`
+  + `drive_b`: `bfa62703f645ff77a8578ae3fc74a00881140d38a404d43c8e2af265bbee9fdc`
+
+**Thông tin giúp tái tạo lại đúng dataset sau 3 tháng**:
+1. Hai file video gốc có mã băm SHA-256 trùng khớp hoàn toàn với mã trên.
+2. Git commit hash của mã nguồn pipeline (chứa toàn bộ logic dbt SQL, các luật lọc chất lượng: loại bỏ black, blurry, near_dup, sync_ok).
+3. Giá trị `LAB_STUDENT_ID = 2A202602552` dùng làm salt để chia split.
+4. Phiên bản chính xác của các bảng Delta ở trên (sử dụng Delta Time Travel `VERSION AS OF` tương ứng).
 
 ## Bước 5 · Điều phối và phục vụ
 
