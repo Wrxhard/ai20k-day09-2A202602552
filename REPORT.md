@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Họ và tên | `Mai Xuân Phúc` |
+| Họ và tên | `Nguyễn Trọng Phúc` |
 | MSSV (đúng bằng `LAB_STUDENT_ID` trong `.env`) | `2A202602552` |
 | GitHub | `Wrxhard` |
 | Trip dùng cho bài tập sập và chạy lại (xem GUIDE, bước 5) | `trip-03365` |
